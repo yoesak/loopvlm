@@ -13,6 +13,11 @@ import torch
 import torch._dynamo.config
 import torch._inductor.config
 
+import re
+
+#torch._dynamo.config.suppress_errors = True
+torch._dynamo.config.capture_scalar_outputs = True
+
 def device_sync(device):
     if "cuda" in device:
         torch.cuda.synchronize()
@@ -510,8 +515,11 @@ def main(
             print(f"Bandwidth achieved: {model_size * tokens_sec / 1e9:.02f} GB/s")
 
             print(processor.decode(y, skip_special_tokens=True))
+            bounding_note = ""
             if ';' not in decoded_output and ('loc' in decoded_output):
-                locations = [int(loc.replace('loc', '').replace('<', '').replace('>', '').replace('detect car\n', '').replace('car', '')) for loc in decoded_output.split("><") if 'loc' in loc]
+                # locations = [int(loc.replace('loc', '').replace('<', '').replace('>', '').replace('detect car\n', '').replace('car', '')) for loc in decoded_output.split("><") if 'loc' in loc]
+                locations = [int(re.sub(r'[A-Za-z\n<>]', '', loc)) for loc in decoded_output.split("><") if 'loc' in loc]
+                bounding_note = decoded_output.split("\n")[0].replace("detect", "")
             else:
                 locations = []
             if len(locations) > 0:
@@ -560,7 +568,7 @@ def main(
 
             draw.rectangle(bounding_boxes, outline="lime", width=3)
             text_position = (bounding_boxes[2] - 5, bounding_boxes[3] - 5)
-            draw.text(text_position, "car", fill="lime", font_size=30)
+            draw.text(text_position, bounding_note, fill="lime", font_size=30)
 
         frame = cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR)
         out.write(frame)

@@ -22,6 +22,9 @@ def download_youtube_video(url, resolution="480p"):
         print(f"An error occurred: {e}")
 
 # Example usage
-url = "https://www.youtube.com/watch?v=A28zps9Q-gE"
+# url = "https://www.youtube.com/watch?v=A28zps9Q-gE"
+# url = "https://www.youtube.com/watch?v=bTumCc767jE"
+# url = "https://www.youtube.com/watch?v=G3shG3msavM"
+url = "https://www.youtube.com/watch?v=-p7L53YoMig"
 download_youtube_video(url)
 
