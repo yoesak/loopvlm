@@ -15,6 +15,13 @@ import torch._inductor.config
 
 import re
 
+from transformers import AutoProcessor, PaliGemmaForConditionalGeneration
+from PIL import Image, ImageDraw, ImageFont
+import requests
+import numpy as np
+import cv2
+
+
 #torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.capture_scalar_outputs = True
 
@@ -26,12 +33,6 @@ def device_sync(device):
     else:
         print(f"device={device} is not yet suppported")
 
-from transformers import AutoProcessor, PaliGemmaForConditionalGeneration
-from PIL import Image, ImageDraw, ImageFont
-import requests
-import torch
-import numpy as np
-import cv2
 
 torch._inductor.config.coordinate_descent_tuning = True
 torch._inductor.config.triton.unique_kernel_names = True
@@ -262,6 +263,35 @@ def _load_model(checkpoint_path, device, precision, use_tp):
 
 B_INST, E_INST = "[INST]", "[/INST]"
 
+def parse_location(input_string):
+    pattern = r'((<(?:loc\d+>))+) ([^<]+)'
+    matches = re.findall(pattern, input_string)
+    return matches
+    
+
+def convert_bbox(bbox, original_size=(1024, 1024), target_size=(480, 854)):
+    """
+    Convert bounding box coordinates from the original resolution to the target resolution.
+
+    Parameters:
+    bbox (tuple): A tuple (x1, y1, x2, y2) representing the bounding box coordinates in the original resolution.
+    original_size (tuple): A tuple (width, height) representing the original resolution.
+    target_size (tuple): A tuple (width, height) representing the target resolution.
+
+    Returns:
+    tuple: A tuple (x1, y1, x2, y2) representing the bounding box coordinates in the target resolution.
+    """
+    original_width, original_height = original_size
+    target_width, target_height = target_size
+
+    x1, y1, x2, y2 = bbox
+
+    x1 = int(x1 * target_width / original_width)
+    y1 = int(y1 * target_height / original_height)
+    x2 = int(x2 * target_width / original_width)
+    y2 = int(y2 * target_height / original_height)
+
+    return (x1, y1, x2, y2)
 def main(
     prompt: str = "Hello, my name is",
     vid_path: str = "",
@@ -290,6 +320,8 @@ def main(
 
     global print
     from tp import maybe_init_dist
+
+    # check if this node can run distribute / parallel
     rank = maybe_init_dist()
     use_tp = rank is not None
     if use_tp:
@@ -503,8 +535,6 @@ def main(
             decoded_output = processor.decode(y, skip_special_tokens=True)
             tokens_generated = y.size(0) - prompt_length
             tokens_sec = tokens_generated / t
-
-            
             aggregate_metrics['tokens_per_sec'].append(tokens_sec)
 
             new_model_fps = int(1 / t)
@@ -515,60 +545,32 @@ def main(
             print(f"Bandwidth achieved: {model_size * tokens_sec / 1e9:.02f} GB/s")
 
             print(processor.decode(y, skip_special_tokens=True))
+
             bounding_note = ""
-            if ';' not in decoded_output and ('loc' in decoded_output):
+            if ('loc' in decoded_output):
                 # locations = [int(loc.replace('loc', '').replace('<', '').replace('>', '').replace('detect car\n', '').replace('car', '')) for loc in decoded_output.split("><") if 'loc' in loc]
-                locations = [int(re.sub(r'[A-Za-z\n<>]', '', loc)) for loc in decoded_output.split("><") if 'loc' in loc]
-                bounding_note = decoded_output.split("\n")[0].replace("detect", "")
-            else:
-                locations = []
-            if len(locations) > 0:
-                bounding_boxes = []
+                
+                # locations = [int(re.sub(r'[A-Za-z\n<>]', '', loc)) for loc in decoded_output.split("><") if 'loc' in loc]
+                # bounding_note = decoded_output.split("\n")[0].replace("detect", "")
 
-            if len(locations) > 0:
-                # Convert locations to bounding boxes
-                bounding_boxes.append(locations[0])
+                matches = parse_location(decoded_output)
+                for i, (coordinates, last_coordinate, description) in enumerate(matches, 1):
+                    bounding_boxes = []
+                    locations = []
+                    locations = [int(re.sub(r'[A-Za-z\n<>]', '', loc)) for loc in coordinates.split("><") if 'loc' in loc]
+                    bounding_boxes.append(locations[0])
+                    bounding_boxes.append(locations[1])
+                    bounding_boxes.append(locations[2])
+                    bounding_boxes.append(locations[3])
+                    
+                    bounding_boxes = convert_bbox(bounding_boxes)
+                    bounding_boxes = [bounding_boxes[1], bounding_boxes[0], bounding_boxes[3], bounding_boxes[2]]
 
-                bounding_boxes.append(locations[1])
-                bounding_boxes.append(locations[2])
+                    draw = ImageDraw.Draw(frame)
 
-                bounding_boxes.append(locations[3])
-
-                def convert_bbox(bbox, original_size=(1024, 1024), target_size=(480, 854)):
-                    """
-                    Convert bounding box coordinates from the original resolution to the target resolution.
-
-                    Parameters:
-                    bbox (tuple): A tuple (x1, y1, x2, y2) representing the bounding box coordinates in the original resolution.
-                    original_size (tuple): A tuple (width, height) representing the original resolution.
-                    target_size (tuple): A tuple (width, height) representing the target resolution.
-
-                    Returns:
-                    tuple: A tuple (x1, y1, x2, y2) representing the bounding box coordinates in the target resolution.
-                    """
-                    original_width, original_height = original_size
-                    target_width, target_height = target_size
-
-                    x1, y1, x2, y2 = bbox
-
-                    x1 = int(x1 * target_width / original_width)
-                    y1 = int(y1 * target_height / original_height)
-                    x2 = int(x2 * target_width / original_width)
-                    y2 = int(y2 * target_height / original_height)
-
-                    return (x1, y1, x2, y2)
-
-                bounding_boxes = convert_bbox(bounding_boxes)
-                bounding_boxes = [bounding_boxes[1], bounding_boxes[0], bounding_boxes[3], bounding_boxes[2]]
-
-        # Draw bounding boxes on the frame if locations are detected
-        if bounding_boxes:
-            draw = ImageDraw.Draw(frame)
-            #font = ImageFont.truetype("arial.ttf", 20)  # Adjust the font and size as needed
-
-            draw.rectangle(bounding_boxes, outline="lime", width=3)
-            text_position = (bounding_boxes[2] - 5, bounding_boxes[3] - 5)
-            draw.text(text_position, bounding_note, fill="lime", font_size=30)
+                    draw.rectangle(bounding_boxes, outline="lime", width=3)
+                    text_position = (bounding_boxes[2] - 5, bounding_boxes[3] - 5)
+                    draw.text(text_position, description, fill="lime", font_size=30)           
 
         frame = cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR)
         out.write(frame)
